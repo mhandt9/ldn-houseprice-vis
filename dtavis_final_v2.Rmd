@@ -1,0 +1,356 @@
+---
+title: "DataVis Final Project"
+author: "Miguel Handt"
+date: "2024-03-12"
+output: html_document
+runtime: shiny
+---
+
+```{r, include=FALSE}
+library(ggplot2, quietly = T)
+library(plotly, quietly = T)
+library(dplyr, quietly = T)
+library(ggthemes, quietly = T)
+library(ggridges, quietly = T)
+library(exactextractr, quietly = T)
+library(sf, quietly = T)
+library(raster, quietly = T)
+
+
+```
+
+
+```{r, include=FALSE}
+
+col_names <- c("transaction_unique_identifier","price","date_of_transfer","postcode","property_type","old_new",
+              "duration","PAON","SAON","street","locality","town_city","district","county","PPD_category_type",
+              "record_status")
+
+
+# pp-sample.csv is a randomly sampled part of the entire dataset
+# I resampled it in python with the following code:
+# pp_lite = pp.sample(frac=0.25, replace=True, random_state=23)
+# pp_lite.to_csv('pp-sample.csv', index=False)
+
+pp <- read.csv("pp-sample.csv", header = F, col.names = col_names)
+
+```
+
+## A1. Prices of the London boroughs visualized
+
+
+A boxplot is a classic method but not everyone knows what it represents: Median, quantiles, outliers etc.
+
+```{r, fig.width=10, fig.height=6, warning=FALSE, echo=FALSE}
+
+lnd <- pp %>% filter(county == "GREATER LONDON")
+
+lnd <- lnd %>%
+  group_by(district) %>%
+  mutate(median_price = median(price)) %>%
+  ungroup() %>%
+  mutate(district = factor(district, levels = unique(district[order(median_price)])))
+
+
+bxplt <- ggplot(lnd, aes(x=price, y=district)) + 
+  geom_boxplot() +
+  labs(title="Comparison of House Prices across London Boroughs", x="Price (£)", y="Borough") +
+  theme(legend.position = "none") +
+  theme_bw() +
+  xlim(0, 2e+6)
+
+bxplt
+
+```
+
+Instead, one solution would be to show a ridge plot, which shows the density nicely with colours and is a bit simpler to understand. The problem is however that it looks too convoluted with all 33 districts in one plot, so I have separated it into two.
+
+
+```{r, fig.width=10, fig.height=6, warning=FALSE, message=FALSE, echo=FALSE}
+
+group1 <- c("REDBRIDGE", "LEWISHAM", "BROMLEY", "ISLINGTON", "BARNET", "NEWHAM", "HARINGEY", "BARKING AND DAGENHAM", "HARROW",
+            "WANDSWORTH", "KENSINGTON AND CHELSEA", "BRENT", "CROYDON", "GREENWICH", "CAMDEN", "CITY OF WESTMINSTER")
+
+group2 <- c("SOUTHWARK", "HAMMERSMITH AND FULHAM", "WALTHAM FOREST", "LAMBETH", "HACKNEY", "HILLINGDON", "CITY OF LONDON", "HAVERING",
+            "EALING", "SUTTON", "ENFIELD", "KINGSTON UPON THAMES", "HOUNSLOW", "TOWER HAMLETS", "MERTON", "RICHMOND UPON THAMES", "BEXLEY")
+
+lnd <- lnd %>%
+  mutate(group = case_when(
+    district %in% group1 ~ 'Group 1',
+    district %in% group2 ~ 'Group 2',
+  ))
+
+# # Filter for Group 1 and plot
+lnd_group_1 <- filter(lnd, group == 'Group 1')
+
+# # Repeat for Group 2
+lnd_group_2 <- filter(lnd, group == 'Group 2')
+
+ggplot(lnd_group_1, aes(x = price, y = district, fill = district)) +
+  geom_density_ridges_gradient(scale = 3, size = 0.3, rel_min_height = 0.01) +
+  scale_fill_viridis_d() +
+  labs(title = "Distribution of House Prices by Borough - Part 1",
+       x = "Price", y = "Borough") +
+  theme_ridges() + theme(legend.position = "none") +
+  xlim(0, 1e+6)
+
+ggplot(lnd_group_2, aes(x = price, y = district, fill = district)) +
+  geom_density_ridges_gradient(scale = 3, size = 0.3, rel_min_height = 0.01) +
+  scale_fill_viridis_d() +
+  labs(title = "Distribution of House Prices by Borough - Part 2",
+       x = "Price", y = "Borough") +
+  theme_ridges() + theme(legend.position = "none") +
+  xlim(0, 1e+6)
+
+
+
+```
+
+A more elegant and interactive way would be to use plotly to create a plot where one can decide which boroughs to compare and also offers the possibility of zooming in and out,  as well as reading data when hovering over a part of the distribution.
+
+```{r, fig.width=10, fig.height=6, warning=FALSE, echo=FALSE}
+
+
+
+dnsplt <- plot_ly(lnd, x = ~price, color = ~district, type = 'histogram',
+               opacity = 0.6, bingroup = 1) %>%
+          layout(barmode = 'overlay',
+                 title = 'Count of House Prices across London Boroughs',
+                 xaxis = list(title = 'Price (£)', range = c(0, 2e+6)),
+                 yaxis = list(title = 'Count of Houses'),
+                 legend = list(title = list(text = 'Borough')),
+                 hovermode = 'closest')
+
+dnsplt
+
+```
+
+
+## A2. Relationship between price of flats and floor level
+
+The data has 5 property types, we filter for "F" (=Flats). Then we can identify that there are certain patterns. The easiest and most robust is assigning the floor level based on the existence of words such as "first", "second", etc. Another option would have been to assume that the first number of the flat number is indicative of the floor (So flat 208 would be on the second floor). I think this is tricky since that might not be the case always and therefore by following this approach I might introduce wrong data into the analysis. 
+
+Regarding the visualization, typically it is nice to show a relationship between two variables with a scatterplot, as it also allows to fit a regression line. However since the floor level is not continuous I have chosen a violin plot with a boxplot inside to better illustrate which of the floors is more expensive. Judging from the plot it would seem that the price rises with the floors, however one has to consider that there are fewer instances of flats with higher floor levels so there might be other factors that are driving prices, for example houses with more floors might be newer and closer to the center of a city.
+
+```{r, fig.width=10, fig.height=6, warning=FALSE, echo=FALSE}
+
+# I remove unneeded data
+rm(lnd, lnd_group_1, lnd_group_2, group1, group2, col_names)
+
+words_pattern <- "LOWER|GROUND|FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH" # I've checked and there is few observations over sixth floor
+
+# Filter out those that are empty or missing + match the regex pattern
+flats <- pp %>% filter(property_type == "F" & !is.na(SAON) & SAON != "" & grepl(words_pattern, SAON, ignore.case = TRUE))
+
+# Assign values based on matched word
+flats <- flats %>%
+  mutate(floor_number = case_when(
+    grepl("LOWER|GROUND", SAON, ignore.case = TRUE) ~ 0,
+    grepl("FIRST", SAON, ignore.case = TRUE) ~ 1,
+    grepl("SECOND", SAON, ignore.case = TRUE) ~ 2,
+    grepl("THIRD", SAON, ignore.case = TRUE) ~ 3,
+    grepl("FOURTH", SAON, ignore.case = TRUE) ~ 4,
+    grepl("FIFTH", SAON, ignore.case = TRUE) ~ 5,
+    grepl("SIXTH", SAON, ignore.case = TRUE) ~ 6,
+    grepl("SEVENTH", SAON, ignore.case = TRUE) ~ 7,
+    grepl("EIGHT", SAON, ignore.case = TRUE) ~ 8
+    ))
+
+
+# Plot violin plot with boxplot
+ggplot(flats, aes(x = factor(floor_number), y = price,  fill = factor(floor_number))) +
+  geom_violin(trim = FALSE) +
+    geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  labs(title = "Price Distribution by Floor Number", x = "Floor Number", y = "Price (£)") +
+  scale_fill_viridis_d() +
+  ylim(0, 1e+6) +
+  theme_minimal()
+
+```
+
+## B1 & B2. Using a GeoJSON file to make a geospatial visualization
+
+```{r, warning=FALSE, echo=FALSE}
+
+# Median by postcode
+
+postalcode_prices <- pp %>%
+  group_by(postcode) %>%
+  summarize(median_price = median(price, na.rm = TRUE),
+            max_price = max(price),
+            min_price = min(price),
+            mean_price = mean(price))
+
+
+postalcode_prices <- postalcode_prices %>% filter(!is.na(postcode) & postcode != "")
+
+# Get lat and long
+# postal_code_geometry <- read.csv("ukpostcodes.csv")
+# 
+# postalcode_data <- left_join(postalcode_prices, postal_code_geometry, by = "postcode")
+# 
+# postalcode_data <- postalcode_data %>% filter(!is.na(longitude) & longitude != "") %>% filter(!is.na(latitude) & latitude != "")
+# 
+# sf.postal <- st_as_sf(postalcode_data, coords = c("longitude", "latitude"), crs = 4326)
+# 
+# st_write(sf.postal, "postcodes_prices.geojson")
+
+
+
+```
+
+```{r}
+# library(shiny)
+# 
+# # Define UI
+# ui <- fluidPage(
+#   titlePanel("Dynamic Zoom on Map"),
+#   selectInput("region", "Select a Region:",
+#               choices = c("Full View", "London", "South-East", "South-West", "North")),
+#   plotOutput("dynamicPlot"))
+# 
+# # Define server logic
+# server <- function(input, output) {
+#   output$dynamicPlot <- renderPlot({
+#     p <- ggplot() +
+#       geom_sf(data = sf.counties, aes(fill = mean_median)) +
+#       scale_fill_distiller(palette = 'YlOrRd', direction = 1) +
+#       ggtitle('Dynamic View') +
+#       theme_bw()
+#     
+#     lnd_p <- ggplot()+
+#       geom_sf(data = sf.london, aes(fill = mean_median)) +
+#       scale_fill_distiller(palette = 'YlOrRd', direction = 1) +
+#       ggtitle('Dynamic View') +
+#       theme_bw()
+# 
+#     # Adjust plot based on selected region
+#     switch(input$region,
+#            "Full View" = p,
+#            "London" = lnd_p,
+#            "South-East" = p + coord_sf(xlim = c(-2, 2), ylim = c(50, 52.5)),
+#            "South-West" = p + coord_sf(xlim = c(-6, -2), ylim = c(50, 52.5)), 
+#            "North" = p + coord_sf(xlim = c(-4.4, 1.6), ylim = c(52, 56))
+#     )
+#   })
+# }
+# 
+# 
+# # Run the app
+# shinyApp(ui = ui, server = server)
+```
+
+```{r tabsets, echo=FALSE} 
+# shinyAppDir(
+# system.file("app", package = "shiny"),   
+# options = list(width = "100%", height = 550   ) 
+# ) 
+```
+
+```{r}
+library(shiny)
+
+sf.postal <- st_read("postcodes_prices.geojson")
+
+raster_extent <- st_bbox(sf.postal)
+raster_res <- 0.01  # This is an example resolution in the units of your CRS
+
+# Create an empty raster with the defined extent and resolution
+raster_template <- raster(xmn=raster_extent$xmin, xmx=raster_extent$xmax, ymn=raster_extent$ymin, ymx=raster_extent$ymax, 
+                          res=raster_res)
+
+r.postal <- rasterize(sf.postal, raster_template, field="median_price", fun=mean)
+
+sf.counties <- st_read("Counties_and_Unitary_Authorities_Dec_2023/CTYUA_DEC_2023_UK_BFC.shp")
+
+
+mean_median_by_districs <- exact_extract(r.postal,
+                                         sf.counties$geometry,
+                                         fun = 'mean')
+
+sf.counties$mean_median <- mean_median_by_districs
+
+sf.counties <- st_transform(sf.counties, 4326)
+
+
+london_districts <- c("REDBRIDGE", "LEWISHAM", "BROMLEY", "ISLINGTON", "BARNET", "NEWHAM", "HARINGEY", "BARKING AND DAGENHAM", "HARROW",
+                      "WANDSWORTH", "KENSINGTON AND CHELSEA", "BRENT", "CROYDON", "GREENWICH", "CAMDEN", "WESTMINSTER", "SOUTHWARK", 
+                      "HAMMERSMITH AND FULHAM", "WALTHAM FOREST", "LAMBETH", "HACKNEY", "HILLINGDON", "CITY OF LONDON", "HAVERING",
+                      "EALING", "SUTTON", "ENFIELD", "KINGSTON UPON THAMES", "HOUNSLOW", "TOWER HAMLETS", "MERTON", "RICHMOND UPON THAMES", "BEXLEY")
+
+sf.counties$CTYUA23NM <- toupper(sf.counties$CTYUA23NM)
+
+sf.london <- sf.counties %>%
+  filter(CTYUA23NM %in% london_districts)
+
+sf.counties$mean_median[ sf.counties$CTYUA23NM %in% london_districts ] <- NA
+
+
+top5_counties <- sf.counties %>%
+  arrange(desc(mean_median)) %>%
+  head(5)
+
+bottom5_counties <- sf.counties %>%
+  arrange(mean_median) %>%
+  head(5)
+
+top5_df <- st_set_geometry(top5_counties, NULL)
+bottom5_df <- st_set_geometry(bottom5_counties, NULL)
+
+
+# Define UI
+ui <- fluidPage(
+  titlePanel("Dynamic Zoom on Map with Data Table"),
+  selectInput("region", "Select a Region:",
+              choices = c("Full View", "London", "South-East", "South-West", "North")),
+  fluidRow(
+    column(8, plotOutput("dynamicPlot")),
+    column(4, 
+           tableOutput("topTable"),
+           tableOutput("bottomTable"))
+  )
+)
+
+# Define server logic
+server <- function(input, output) {
+  output$dynamicPlot <- renderPlot({
+    # Base plot for all regions except London
+    p <- ggplot() +
+      geom_sf(data = sf.counties, aes(fill = mean_median)) +
+      scale_fill_distiller(palette = 'YlOrRd', direction = 1) +
+      ggtitle('Dynamic View') +
+      theme_bw()
+    
+    # Separate plot for London using its own data
+    lnd_p <- ggplot() +
+      geom_sf(data = sf.london, aes(fill = mean_median)) +
+      scale_fill_distiller(palette = 'YlOrRd', direction = 1) +
+      ggtitle('London View') +
+      theme_bw()
+    
+    # Adjust plot based on selected region
+    switch(input$region,
+           "Full View" = p,
+           "London" = lnd_p, # Use the separate London plot when "London" is selected
+           "South-East" = p + coord_sf(xlim = c(-2, 2), ylim = c(50, 52.5)),
+           "South-West" = p + coord_sf(xlim = c(-6, -2), ylim = c(50, 52.5)), 
+           "North" = p + coord_sf(xlim = c(-4.4, 1.6), ylim = c(52, 56))
+    )
+  })
+  
+  output$topTable <- renderTable({
+    top5_df[, c("CTYUA23NM", "mean_median")]
+  })
+  
+  # Render table for bottom 5 counties
+  output$bottomTable <- renderTable({
+    bottom5_df[, c("CTYUA23NM", "mean_median")]
+  })
+}
+
+# Run the app
+shinyApp(ui = ui, server = server)
+
+
+```
+
