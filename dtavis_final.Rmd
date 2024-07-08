@@ -1,0 +1,501 @@
+---
+title: "DataVis Final Project"
+author: "Miguel Handt"
+date: "2024-03-12"
+output: html_document
+runtime: shiny
+---
+
+```{r, include=FALSE}
+library(ggplot2, quietly = T)
+library(plotly, quietly = T)
+library(dplyr, quietly = T)
+library(ggthemes, quietly = T)
+library(ggridges, quietly = T)
+library(exactextractr, quietly = T)
+library(sf, quietly = T)
+library(raster, quietly = T)
+library(shiny, quietly = T)
+library(leaflet, quietly = T)
+```
+
+```{r, include=FALSE}
+
+col_names <- c("transaction_unique_identifier","price","date_of_transfer","postcode","property_type","old_new",
+              "duration","PAON","SAON","street","locality","town_city","district","county","PPD_category_type",
+              "record_status")
+
+
+# pp-sample.csv is a randomly sampled part of the entire dataset
+# I resampled it in python with the following code:
+# pp_lite = pp.sample(frac=0.25, replace=True, random_state=23)
+# pp_lite.to_csv('pp-sample.csv', index=False)
+
+pp <- read.csv("pp-sample.csv", header = F, col.names = col_names)
+
+```
+
+## A1. Prices of the London boroughs visualized
+
+A boxplot is a classic method but not everyone knows what it represents: Median, quantiles, outliers etc. We can see that the highest median house price correspond to Kensington and Chelsea as we would expect since it is a residential neighborhood with many rich and also famous residents, for example Rowan Atkinson, Elton John, etc. We can also see that the 75th percentile is far above those of any other borough, showing that the top 25% most expensive houses are noticeably more expensive than in the rest of London. Overall, we can also see that prices are positively skewed since the tails are much longer on the right side, and in fact the plot had to be cropped since there are some extreme outliers.
+
+```{r, fig.width=10, fig.height=6, warning=FALSE, echo=FALSE}
+
+# filter only greater london
+lnd <- pp %>% filter(county == "GREATER LONDON")
+
+# median price by district plus ordering by median
+lnd <- lnd %>%
+  group_by(district) %>%
+  mutate(median_price = median(price)) %>%
+  ungroup() %>%
+  mutate(district = factor(district, levels = unique(district[order(median_price)])))
+
+# boxplot plot
+bxplt <- ggplot(lnd, aes(x=price, y=district)) + 
+  geom_boxplot() +
+  labs(title="Comparison of House Prices across London Boroughs", x="Price (£)", y="Borough") +
+  theme(legend.position = "none") +
+  theme_bw() +
+  xlim(0, 2e+6)
+
+bxplt
+
+```
+
+Instead of the boxplot, one solution would be to show a ridge plot, which shows the density nicely with colours and is a bit simpler to understand. The problem is however that it looks too convoluted with all 33 districts in one plot, so I have separated it into two.
+
+```{r, fig.width=10, fig.height=6, warning=FALSE, message=FALSE, echo=FALSE}
+
+group1 <- c("REDBRIDGE", "LEWISHAM", "BROMLEY", "ISLINGTON", "BARNET", "NEWHAM", "HARINGEY", "BARKING AND DAGENHAM", "HARROW",
+            "WANDSWORTH", "KENSINGTON AND CHELSEA", "BRENT", "CROYDON", "GREENWICH", "CAMDEN", "CITY OF WESTMINSTER")
+
+group2 <- c("SOUTHWARK", "HAMMERSMITH AND FULHAM", "WALTHAM FOREST", "LAMBETH", "HACKNEY", "HILLINGDON", "CITY OF LONDON", "HAVERING",
+            "EALING", "SUTTON", "ENFIELD", "KINGSTON UPON THAMES", "HOUNSLOW", "TOWER HAMLETS", "MERTON", "RICHMOND UPON THAMES", "BEXLEY")
+
+lnd <- lnd %>%
+  mutate(group = case_when(
+    district %in% group1 ~ 'Group 1',
+    district %in% group2 ~ 'Group 2',
+  ))
+
+# Filter for Group 1 and plot
+lnd_group_1 <- filter(lnd, group == 'Group 1')
+
+# Repeat for Group 2
+lnd_group_2 <- filter(lnd, group == 'Group 2')
+
+ggplot(lnd_group_1, aes(x = price, y = district, fill = district)) +
+  geom_density_ridges_gradient(scale = 3, size = 0.3, rel_min_height = 0.01) +
+  scale_fill_viridis_d() +
+  labs(title = "Distribution of House Prices by Borough - Part 1",
+       x = "Price", y = "Borough") +
+  theme_ridges() + theme(legend.position = "none") +
+  xlim(0, 1e+6)
+
+ggplot(lnd_group_2, aes(x = price, y = district, fill = district)) +
+  geom_density_ridges_gradient(scale = 3, size = 0.3, rel_min_height = 0.01) +
+  scale_fill_viridis_d() +
+  labs(title = "Distribution of House Prices by Borough - Part 2",
+       x = "Price", y = "Borough") +
+  theme_ridges() + theme(legend.position = "none") +
+  xlim(0, 1e+6)
+
+
+
+```
+
+A more elegant and interactive way would be to use plotly to create a plot where one can decide which boroughs to compare and also offers the possibility of zooming in and out, as well as reading data when hovering over a part of the distribution.
+
+```{r, fig.width=10, fig.height=6, warning=FALSE, echo=FALSE}
+
+
+
+dnsplt <- plot_ly(lnd, x = ~price, color = ~district, type = 'histogram',
+               opacity = 0.6, bingroup = 1) %>%
+          layout(barmode = 'overlay',
+                 title = 'Count of House Prices across London Boroughs',
+                 xaxis = list(title = 'Price (£)', range = c(0, 2e+6)),
+                 yaxis = list(title = 'Count of Houses'),
+                 legend = list(title = list(text = 'Borough')),
+                 hovermode = 'closest')
+
+dnsplt
+
+```
+
+## A2. Relationship between price of flats and floor level
+
+The data has 5 property types, we filter for "F" (=Flats). Then we can identify that there are certain patterns. The easiest and most robust is assigning the floor level based on the existence of words such as "first", "second", etc. Another option would have been to assume that the first number of the flat number is indicative of the floor (So flat 208 would be on the second floor). I think this is tricky since that might not be the case always and therefore by following this approach I might introduce wrong data into the analysis.
+
+Regarding the visualization, typically it is nice to show a relationship between two variables with a scatterplot, as it also allows to fit a regression line. However since the floor level is not continuous I have chosen a violin plot with a boxplot inside to better illustrate which of the floors is more expensive. Judging from the plot it would seem that the price rises with the floors, however one has to consider that there are fewer instances of flats with higher floor levels and that there might be other factors that are driving prices, for example houses with more floors might be newer and closer to the center of a city.
+
+```{r, fig.width=10, fig.height=6, warning=FALSE, echo=FALSE}
+
+# I remove unneeded data
+rm(lnd, lnd_group_1, lnd_group_2, group1, group2, col_names)
+
+words_pattern <- "LOWER|GROUND|FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH" # I've checked and there is few observations over sixth floor
+
+# Filter out those that are empty or missing + match the regex pattern
+flats <- pp %>% filter(property_type == "F" & !is.na(SAON) & SAON != "" & grepl(words_pattern, SAON, ignore.case = TRUE))
+
+# Assign values based on matched word
+flats <- flats %>%
+  mutate(floor_number = case_when(
+    grepl("LOWER|GROUND", SAON, ignore.case = TRUE) ~ 0,
+    grepl("FIRST", SAON, ignore.case = TRUE) ~ 1,
+    grepl("SECOND", SAON, ignore.case = TRUE) ~ 2,
+    grepl("THIRD", SAON, ignore.case = TRUE) ~ 3,
+    grepl("FOURTH", SAON, ignore.case = TRUE) ~ 4,
+    grepl("FIFTH", SAON, ignore.case = TRUE) ~ 5,
+    grepl("SIXTH", SAON, ignore.case = TRUE) ~ 6,
+    grepl("SEVENTH", SAON, ignore.case = TRUE) ~ 7,
+    grepl("EIGHT", SAON, ignore.case = TRUE) ~ 8
+    ))
+
+
+# Plot violin plot with boxplot
+ggplot(flats, aes(x = factor(floor_number), y = price,  fill = factor(floor_number))) +
+  geom_violin(trim = FALSE) +
+    geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+  labs(title = "Price Distribution by Floor Number", x = "Floor Number", y = "Price (£)") +
+  scale_fill_viridis_d() +
+  ylim(0, 1e+6) +
+  theme_minimal()
+
+```
+
+## B1. & B2. Using a GeoJSON file to make a geospatial visualization
+
+Thanks to latitude and longitude data from [link](https://www.freemaptools.com/download-uk-postcode-lat-lng.htm) I managed to create the required GeoJSON file. I use the package "sf" since I am familiar with it from the course "Geospatial Data Science". The file can then be read with st_read and has a geometry column. What I decided to do with it in terms of visualization is that I turn the points into raster data with resolution 0.01, which I then can aggregate into the multipolygons of another file, a shapefile with the counties of the UK from [link](https://geoportal.statistics.gov.uk/datasets/941217c8d0ea43fabdad50d9b39234f5_0/explore). So I end up having the mean of the median house prices (it feels a bit weird to take the mean of medians, maybe not the best approach) of the postal codes within each of the counties in the UK. My thought process behind this is that it makes no sense to create a visualization with the median prices for each postal code, since that is way too much data to take in and makes for a very convoluted visualization (not finding a shapefile of the postal codes also contributed to this decision).
+
+Finally, since even aggregated into county level data the plot is not readable enough I decided to embed a shiny app into the RMarkdown file with a radio button that allows to choose between different zoomed in plots. Since London in terms of house prices is in a league of its own, I removed it out of the larger plot by setting its values to NAs and offering a separate plot for the capital city. A nice extension would have been to have reactive top 5 and bottom 5 tables specific to the area in which one is zooming in but I did not get that to work.
+
+## B3. Median vs. Mean
+
+In this kind of setting median is better than mean since mean tends to be heavily affected by skewed distributions. So we would expect the mean to be generally greater than the median. We have seen that this is true for all the boroughs in London, where there are quite a lot of very expensive houses skewing the distribution. The mean and median are only equal to each other if the distribution is perfectly symmetrical, which is rarely if ever going to be the case in the housing market.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+
+# Median by postcode
+postalcode_prices <- pp %>%
+  group_by(postcode) %>%
+  summarize(median_price = median(price, na.rm = TRUE),
+            max_price = max(price),
+            min_price = min(price),
+            mean_price = mean(price))
+
+
+postalcode_prices <- postalcode_prices %>% filter(!is.na(postcode) & postcode != "")
+
+# Get lat and long
+# postal_code_geometry <- read.csv("ukpostcodes.csv")
+# 
+# postalcode_data <- left_join(postalcode_prices, postal_code_geometry, by = "postcode")
+# 
+# postalcode_data <- postalcode_data %>% filter(!is.na(longitude) & longitude != "") %>% filter(!is.na(latitude) & latitude != "")
+# 
+# sf.postal <- st_as_sf(postalcode_data, coords = c("longitude", "latitude"), crs = 4326)
+# 
+# st_write(sf.postal, "postcodes_prices.geojson")
+
+
+
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, results='hide'}
+
+sf.postal <- st_read("postcodes_prices.geojson")
+
+# cropping raster and setting resolution
+raster_extent <- st_bbox(sf.postal)
+raster_res <- 0.01
+
+# Empty raster with the defined extent and resolution
+raster_template <- raster(xmn=raster_extent$xmin, xmx=raster_extent$xmax, ymn=raster_extent$ymin, ymx=raster_extent$ymax, 
+                          res=raster_res)
+
+# Fill raster with the points of the postal codes 
+r.postal <- rasterize(sf.postal, raster_template, field="median_price")
+
+# Load counties shapefile
+sf.counties <- st_read("Counties_and_Unitary_Authorities_Dec_2023/CTYUA_DEC_2023_UK_BFC.shp")
+
+# Get the mean of the median prices of the postal codes within the counties
+mean_median_by_districs <- exact_extract(r.postal,
+                                         sf.counties$geometry,
+                                         fun = 'mean')
+
+sf.counties$mean_median <- mean_median_by_districs
+
+# Transform the crs to something more widely used (ESPG:4326)
+sf.counties <- st_transform(sf.counties, 4326)
+
+# Now I want to set up the data to be able to do a separate plot just for london
+london_districts <- c("REDBRIDGE", "LEWISHAM", "BROMLEY", "ISLINGTON", "BARNET", "NEWHAM", "HARINGEY", "BARKING AND DAGENHAM", "HARROW",
+                      "WANDSWORTH", "KENSINGTON AND CHELSEA", "BRENT", "CROYDON", "GREENWICH", "CAMDEN", "WESTMINSTER", "SOUTHWARK", 
+                      "HAMMERSMITH AND FULHAM", "WALTHAM FOREST", "LAMBETH", "HACKNEY", "HILLINGDON", "CITY OF LONDON", "HAVERING",
+                      "EALING", "SUTTON", "ENFIELD", "KINGSTON UPON THAMES", "HOUNSLOW", "TOWER HAMLETS", "MERTON", "RICHMOND UPON THAMES", "BEXLEY")
+
+# Turn the county names uppercase
+sf.counties$CTYUA23NM <- toupper(sf.counties$CTYUA23NM)
+
+# Just London
+sf.london <- sf.counties %>%
+  filter(CTYUA23NM %in% london_districts)
+
+# Now turn it into NA in the original
+sf.counties$mean_median[ sf.counties$CTYUA23NM %in% london_districts ] <- NA
+
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+
+ui <- fluidPage(
+  titlePanel("House Prices in the Counties of the UK"),
+  fluidRow(
+    column(12, 
+           radioButtons("mapType", "Choose Map Type:",
+                        choices = c("Full Map" = "full", "London Map" = "london"),
+                        selected = "full") # choice between entire map and London
+    )
+  ),
+  fluidRow(
+    column(12, leafletOutput("dynamicMap"))
+  )
+)
+
+
+server <- function(input, output) {
+  
+  output$dynamicMap <- renderLeaflet({
+    map <- leaflet() %>%
+      addProviderTiles(providers$CartoDB.Positron)
+
+    if (input$mapType == "full") {
+      
+      # Separate color palette for full and london
+      colorPalette <- colorNumeric(palette = "YlGnBu", domain = range(sf.counties$mean_median, na.rm = TRUE))
+      
+      # add polygons from sf.counties
+      map <- map %>%
+        addPolygons(data = sf.counties, fillColor = ~colorPalette(mean_median),
+                    color = "#BDBDC3", weight = 1, fillOpacity = 0.7,
+                    popup = ~paste(CTYUA23NM, "Average Median Price: ", mean_median)) %>%
+        setView(lng = -1.5, lat = 54.2, zoom = 5)
+      
+      #add legend for full
+      map <- map %>%
+        addLegend(position = "bottomright",
+              pal = colorPalette,
+              values = sf.counties$mean_median,
+              title = "Average Median Price",
+              opacity = 0.7,
+              labFormat = labelFormat(prefix = "£"))
+      
+    } else if (input$mapType == "london") {
+      
+      colorPalette <- colorNumeric(palette = "YlGnBu", domain = range(sf.london$mean_median, na.rm = TRUE))
+      
+      # add polygons from sf.london
+      map <- map %>%
+        addPolygons(data = sf.london, fillColor = ~colorPalette(mean_median),
+                    color = "#BDBDC3", weight = 1, fillOpacity = 0.7,
+                    popup = ~paste(CTYUA23NM, "Average Median Price: ", mean_median)) %>%
+        setView(lng = -0.1278, lat = 51.5074, zoom = 9)
+      
+      # add legend for london
+      map <- map %>%
+        addLegend(position = "bottomright",
+              pal = colorPalette,
+              values = sf.london$mean_median,
+              title = "Average Median Price",
+              opacity = 0.7,
+              labFormat = labelFormat(prefix = "£"))
+      
+      
+    }
+    
+    map
+
+  })
+}
+
+shinyApp(ui = ui, server = server, options = list(height = 600)) # extra height so that it fits without a scrolling bar
+
+
+```
+
+## C1. Examine the house prices for the years 2015 and 2019. How do these change over time? Do property prices seem to increase or decrease throughout these years?
+
+I give the option of comparing not only 2015 and 2019 but any number of years. The mean prices have been cleaned by removal of outliers. There are then two plots in the shiny app below one with data grouped by month and the other by days. **For some reason, this plot looks right if the shiny app is run on its own but not when running the whole document!** By months the plot shows that the prices in 2019 are clearly higher on average than in 2015. Daily prices reveal that the price volatility is higher in 2019, reaching higher peaks but also sometimes lower points. Monthly we can see that the lines move together in many cases, for example both dip in May and then rebound. Then they dip again in October and grow in November and December. These drops might coincide with periods of higher demand. Certainly consumer spending goes up at the end of the year but it is hard to say whether this extends to houses.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+pp$date_of_transfer <- as.Date(pp$date_of_transfer, format="%Y-%m-%d")
+
+pp <- pp %>%
+  mutate(
+    Year = format(date_of_transfer, "%Y"),
+    Month = format(date_of_transfer, "%m")
+  )
+
+# Function to identify and remove outliers within each group
+remove_outliers <- function(data, price_col = "price") {
+  Q1 <- quantile(data[[price_col]], 0.25, na.rm = TRUE)
+  Q3 <- quantile(data[[price_col]], 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  # Return data without outliers
+  data %>%
+    filter(!!sym(price_col) >= lower_bound, !!sym(price_col) <= upper_bound)
+}
+
+# Aggregate and clean data on a daily basis
+pp_gb_date <- pp %>%
+  group_by(date_of_transfer) %>%
+  summarise(Avg_Price = mean(price, na.rm = TRUE), .groups = 'drop') %>%
+  ungroup() %>%
+  # Apply outlier removal
+  mutate(Year = format(date_of_transfer, "%Y")) %>%
+  group_by(Year) %>%
+  group_modify(~remove_outliers(.x, "Avg_Price")) %>%
+  ungroup()
+
+# Prepare for monthly aggregation as well for the app's use
+pp_gb_month <- pp %>%
+  group_by(Year, Month = format(date_of_transfer, "%m")) %>%
+  summarise(Avg_Price = mean(price, na.rm = TRUE), .groups = 'drop') %>%
+  # Apply outlier removal
+  group_modify(~remove_outliers(.x, "Avg_Price")) %>%
+  ungroup()
+
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+
+ui <- fluidPage(
+  titlePanel("House Price Trends"),
+  
+  # place the selection box in its own row to span the full width
+  fluidRow(
+    column(12,
+           selectInput("yearInput", "Select Year(s):",
+                       choices = unique(pp_gb_month$Year), multiple = TRUE, selected = c("2015", "2019"))
+    )
+  ),
+
+  # Place plots in subsequent rows below the selection inputs
+  fluidRow(
+    column(12, plotOutput("monthlyPlot", width = "100%"))
+  ),
+  fluidRow(
+    column(12, plotOutput("dailyPlot", width = "100%"))
+  )
+)
+
+
+server <- function(input, output) {
+  
+  # reactive expression to hold the selected years
+  selectedYears <- reactive({
+    as.numeric(input$yearInput)
+  })
+  
+  output$monthlyPlot <- renderPlot({
+    
+    # Use reactive value of selectedYears
+    selectedData <- pp_gb_month %>%
+      filter(Year %in% selectedYears())
+    
+    ggplot(selectedData, aes(x = Month, y = Avg_Price, group = Year, color = Year)) +
+      geom_line(linewidth = 1) +
+      labs(title = "Monthly House Price Trends",
+           x = "Month", y = "Average Price") +
+      theme_bw() +
+      scale_color_brewer(palette = 'Set1')
+  })
+
+  output$dailyPlot <- renderPlot({
+    # Use the same selectedYears reactive expression
+    selectedData <- pp_gb_date %>%
+      filter(Year %in% selectedYears()) %>%
+      mutate(MonthDay = format(date_of_transfer, "%m-%d"))  # For daily plotting
+    
+    # Create fake dates in arbitrary year 2020 just for the x-axis to look right
+    selectedData$Date <- as.Date(paste("2020-", selectedData$MonthDay, sep=""), format="%Y-%m-%d")
+
+    ggplot(selectedData, aes(x = Date, y = Avg_Price, group = Year, color = Year)) +
+      geom_line(linewidth = 1) +
+      labs(title = "Daily House Price Trends",
+           x = "Date", y = "Average Price") +
+      scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+      theme_bw() +
+      scale_color_brewer(palette = 'Set1')
+  })
+}
+
+shinyApp(ui = ui, server = server, options = list(height = 1000))
+
+```
+
+## C2. Is there a significant relationship between the price of a property and the time of year it is sold? Does this vary with type of property?
+
+For monthly data, a simple bar chart for each of the property types answers this question. All properties except O = "Other" have only small fluctuations in their average prices across months. We can further test this through linear regressions and see that actually none of the months are correlated with average prices for any of the property types.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, fig.width=10}
+
+pp <- pp %>%
+  mutate(
+    property_type = as.factor(property_type)
+  )
+
+pp_gb_month <- pp %>%
+  group_by(Month, property_type) %>%
+  summarise(Avg_Price = mean(price, na.rm = TRUE), .groups = 'drop')
+
+
+
+
+ggplot(pp_gb_month, aes(x = Month, y = Avg_Price, color = property_type, group = property_type)) +
+  geom_line() +
+  geom_point() + # Adds points on each data value for clarity
+  labs(title = "Monthly Average Housing Prices by Property Type",
+       x = "Month", y = "Average Price") +
+  theme_minimal() +
+  scale_color_viridis_d() # Colors lines based on property_type
+
+
+pp_gb_month <- pp %>%
+  group_by(Year, Month, property_type) %>%
+  summarise(Avg_Price = mean(price, na.rm = TRUE), .groups = 'drop')
+
+# initialize an empty list to store models
+models <- list()
+
+# Loop over each property type and run a regression
+unique_property_types <- unique(pp_gb_month$property_type)
+for(property_type in unique_property_types) {
+  # Subset the data for the property type
+  subset_data <- pp_gb_month[pp_gb_month$property_type == property_type,]
+  
+  # Fit the linear model
+  model <- lm(Avg_Price ~ Month, data = subset_data)
+  
+  # Store the model in the list
+  models[[as.character(property_type)]] <- model
+}
+
+# Loop and print
+for(property_type in names(models)) {
+  cat("Regression summary for property type:", property_type, "\n")
+  print(summary(models[[property_type]]))
+  cat("\n-----------------------------------------------\n")
+}
+
+
+
+
+```
